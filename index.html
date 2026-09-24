@@ -981,11 +981,10 @@ function buildFormatSheet(d){
   inner += ovCheck(COL_B.x,128.76,COL_B.w,7.92, d.acceso==='Sellado');
   inner += ovCheck(COL_A.x,136.68,COL_A.w,7.92, d.situacion==='Enterrado');
   inner += ovCheck(COL_B.x,136.68,COL_B.w,7.92, d.situacion==='No ubicado');
-  // Coordenadas: 2 campos separados (Este / Norte), cada uno con su propio recuadro completo
-  inner += `<div style="position:absolute;left:${px(182.9)}px;top:${px(145.1)}px;width:${px(74.6)}px;height:${px(7.4)}px;border:1px solid #333;box-sizing:border-box;"></div>`;
-  inner += `<div style="position:absolute;left:${px(258.4)}px;top:${px(145.1)}px;width:${px(74.4)}px;height:${px(7.4)}px;border:1px solid #333;box-sizing:border-box;"></div>`;
-  inner += ov(182.9,145.1,74.6,7.4, esc(d.coordEste), {fontPt:6.3});
-  inner += ov(258.4,145.1,74.4,7.4, esc(d.coordNorte), {fontPt:6.3});
+  // Coordenadas: tal cual el PDF original -> caja ancha (182.52-257.16), espacio en blanco, caja angosta (278.64-333.00)
+  // (el contorno ya viene dibujado en el fondo; solo se centra el valor dentro)
+  inner += ov(182.52,144.6,74.64,8.4, esc(d.coordEste), {fontPt:6.3});
+  inner += ov(278.64,144.6,54.36,8.4, esc(d.coordNorte), {fontPt:6.3});
 
   // ---- Estado General ----
   ESTADO_ROWS.forEach(row=>{
