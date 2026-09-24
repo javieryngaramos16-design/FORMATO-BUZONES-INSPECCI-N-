@@ -192,6 +192,7 @@ textarea{resize:vertical;min-height:60px;}
       <label class="field">Buzón <input type="text" id="f_buzon" placeholder="ej. 12" oninput="updateAutoCodigo()"></label>
       <label class="field">Código (automático) <input type="text" id="f_codigo" readonly style="background:rgba(128,128,128,.08);font-weight:700;"></label>
       <label class="field">Diámetro interno del buzón (m) <input type="number" step="0.01" id="f_diamInterno"></label>
+      <label class="field">Profundidad del buzón (m) <input type="number" step="0.01" id="f_profundidad"></label>
     </div>
     <div class="grid2" style="margin-top:10px">
       <label class="field">Av/Calle <input type="text" id="f_avcalle"></label>
@@ -400,7 +401,7 @@ function renderPhotoBox(i){
   if(p && p.dataUrl){
     html += `<img src="${p.dataUrl}">`;
     if(!nogeo && p.geo){
-      html += `<div class="geobadge">📍 ${p.geo.utm || 'UTM no disponible'}<br>🕒 ${p.geo.timestamp}</div>`;
+      html += `<div class="subnote" style="margin-top:2px;">✅ Con georreferencia</div>`;
     }
     html += `<div><button class="retake" onclick="retakePhoto(${i})">Volver a tomar</button></div>`;
   } else {
@@ -414,6 +415,43 @@ function renderPhotoBox(i){
 }
 function retakePhoto(i){ photos[i] = null; renderPhotoBox(i); }
 
+let _photoIndexCounter = null;
+async function nextPhotoIndex(){
+  try{
+    const db = await getDb();
+    if(db){
+      const ref = db.doc('meta/photo_counter');
+      let cur = 0;
+      try{
+        const snap = await ref.get();
+        const data = snap ? ((typeof snap.data==='function')?snap.data():snap) : null;
+        cur = (data && data.value) ? data.value : 0;
+      }catch(e){ cur = 0; }
+      cur += 1;
+      await ref.set({ value: cur });
+      return cur;
+    } else {
+      let cur = parseInt(localStorage.getItem('photo_counter')||'0',10) || 0;
+      cur += 1;
+      localStorage.setItem('photo_counter', String(cur));
+      return cur;
+    }
+  }catch(e){ return Math.floor(Date.now()/1000) % 10000; }
+}
+
+function tzLabel(date){
+  const offMin = -date.getTimezoneOffset();
+  const sign = offMin >= 0 ? '+' : '-';
+  const abs = Math.abs(offMin);
+  const hh = String(Math.floor(abs/60)).padStart(2,'0');
+  const mm = String(abs%60).padStart(2,'0');
+  return `GMT${sign}${hh}:${mm}`;
+}
+function fmtStampDate(date){
+  const opts = { day:'numeric', month:'short', year:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true };
+  return date.toLocaleString('es-PE', opts).replace('.', '');
+}
+
 function handlePhoto(evt, i){
   const file = evt.target.files[0];
   if(!file) return;
@@ -421,9 +459,9 @@ function handlePhoto(evt, i){
   const reader = new FileReader();
   reader.onload = function(e){
     const img = new Image();
-    img.onload = function(){
+    img.onload = async function(){
       const canvas = document.createElement('canvas');
-      const maxW = 800;
+      const maxW = 900;
       const scale = Math.min(1, maxW/img.width);
       canvas.width = img.width*scale;
       canvas.height = img.height*scale;
@@ -432,45 +470,71 @@ function handlePhoto(evt, i){
 
       const finish = (geo) => {
         if(geo){
-          const barH = Math.max(34, canvas.height*0.11);
-          ctx.fillStyle = "rgba(0,0,0,0.55)";
-          ctx.fillRect(0, canvas.height-barH, canvas.width, barH);
-          ctx.fillStyle = "#fff";
-          const fs = Math.max(11, canvas.width*0.028);
-          ctx.font = fs+"px sans-serif";
-          ctx.textBaseline = "middle";
-          const line1 = "📍 "+geo.utm;
-          const line2 = "🕒 "+geo.timestamp;
-          ctx.fillText(line1, 8, canvas.height-barH+barH*0.32);
-          ctx.fillText(line2, 8, canvas.height-barH+barH*0.72);
+          const pad = canvas.width*0.02;
+          const fs = Math.max(11, canvas.width*0.026);
+          ctx.font = fs+"px Arial, sans-serif";
+          ctx.textAlign = "right";
+          ctx.textBaseline = "bottom";
+          const lines = geo.stampLines || [];
+          const lineH = fs*125/1000*10; // ~1.25 line height
+          let y = canvas.height - pad;
+          // draw from bottom up
+          for(let li=lines.length-1; li>=0; li--){
+            ctx.lineWidth = fs*0.18;
+            ctx.strokeStyle = "rgba(0,0,0,0.65)";
+            ctx.fillStyle = "#fff";
+            ctx.strokeText(lines[li], canvas.width-pad, y);
+            ctx.fillText(lines[li], canvas.width-pad, y);
+            y -= fs*1.3;
+          }
         }
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.62);
         photos[i] = { dataUrl, geo: geo || null };
         renderPhotoBox(i);
       };
 
       if(nogeo){
         finish(null);
-      } else if(navigator.geolocation){
+        return;
+      }
+
+      // (contador de índice y remark ya no se usan en el sello)
+
+      const buildGeo = (pos, utm, altText) => {
+        const now = new Date();
+        const netStr = fmtStampDate(now);
+        const tz = tzLabel(now);
+        const stampLines = [
+          `Network: ${netStr} ${tz}`,
+          `Local: ${netStr} ${tz}`,
+          utm,
+          `Altitud: ${altText}`,
+          `Velocidad: ${pos && pos.coords.speed ? pos.coords.speed.toFixed(1) : '0.0'}km/h`
+        ];
+        return {
+          lat: pos ? pos.coords.latitude : null,
+          lng: pos ? pos.coords.longitude : null,
+          utm,
+          timestamp: now.toLocaleString(),
+          stampLines
+        };
+      };
+
+      if(navigator.geolocation){
         navigator.geolocation.getCurrentPosition(
           (pos)=>{
             const utm = toUTM(pos.coords.latitude, pos.coords.longitude);
-            const now = new Date();
-            finish({
-              lat: pos.coords.latitude, lng: pos.coords.longitude,
-              utm: utm,
-              timestamp: now.toLocaleString()
-            });
+            const altText = (pos.coords.altitude!==null && pos.coords.altitude!==undefined)
+              ? Math.round(pos.coords.altitude)+'msnm' : 'No disponible';
+            finish(buildGeo(pos, utm, altText));
           },
           ()=>{
-            const now = new Date();
-            finish({ utm: "Ubicación no disponible", timestamp: now.toLocaleString() });
+            finish(buildGeo(null, 'Ubicación no disponible', 'No disponible'));
           },
           { enableHighAccuracy:true, timeout:8000 }
         );
       } else {
-        const now = new Date();
-        finish({ utm: "Geolocalización no soportada", timestamp: now.toLocaleString() });
+        finish(buildGeo(null, 'Geolocalización no soportada', 'No disponible'));
       }
     };
     img.src = e.target.result;
@@ -523,7 +587,7 @@ function collectForm(){
   return {
     consorcio: val('f_consorcio'), inspector: val('f_inspector'), fechaEmision: val('f_fechaEmision'),
     colector: val('f_colector'), fecha: val('f_fecha'), hora: val('f_hora'),
-    buzon: val('f_buzon'), codigo: val('f_codigo'), diamInterno: val('f_diamInterno'),
+    buzon: val('f_buzon'), codigo: val('f_codigo'), diamInterno: val('f_diamInterno'), profundidad: val('f_profundidad'),
     avcalle: val('f_avcalle'), mzlote: val('f_mzlote'),
     descargar: val('f_descargar'), sistema: val('f_sistema'),
     acceso: getRadio('acceso'), situacion: getRadio('situacion'),
@@ -546,7 +610,7 @@ function setVal(id, v){ document.getElementById(id).value = v || ""; }
 function fillForm(d){
   setVal('f_consorcio', d.consorcio); setVal('f_inspector', d.inspector); setVal('f_fechaEmision', d.fechaEmision);
   setVal('f_colector', d.colector); setVal('f_fecha', d.fecha); setVal('f_hora', d.hora);
-  setVal('f_buzon', d.buzon); setVal('f_codigo', d.codigo); setVal('f_diamInterno', d.diamInterno);
+  setVal('f_buzon', d.buzon); setVal('f_codigo', d.codigo); setVal('f_diamInterno', d.diamInterno); setVal('f_profundidad', d.profundidad);
   setVal('f_avcalle', d.avcalle); setVal('f_mzlote', d.mzlote);
   setVal('f_descargar', d.descargar); setVal('f_sistema', d.sistema);
   setRadio('acceso', d.acceso); setRadio('situacion', d.situacion);
@@ -813,6 +877,19 @@ async function renderList(){
 let _currentViewId = null;
 
 function esc(s){ return (s===undefined||s===null) ? '' : String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmtFecha(iso){
+  if(!iso) return '';
+  const parts = String(iso).split('-');
+  if(parts.length !== 3) return iso;
+  const [y,m,d] = parts;
+  return `${d}/${m}/${y}`;
+}
+function fmtBuzon(v){
+  if(v===undefined||v===null||v==='') return '';
+  const s = String(v).trim();
+  if(/^\d+$/.test(s)) return s.padStart(2,'0');
+  return s;
+}
 function numOrBlank(v){ return (v===undefined||v===null||v==='') ? '' : v; }
 
 function pctX(v){ return (v/PAGE_W*100); }
@@ -822,15 +899,18 @@ function px(v){ return (v*SCALE_BASE).toFixed(2); }
 // Absolutely-positioned overlay div, coordinates in PDF points (top-left origin), fixed px (scaled later via transform)
 function ov(xPt,yPt,wPt,hPt,html,opts){
   opts = opts || {};
-  const fontPt = opts.fontPt || 7;
-  const align = opts.align === 'left' ? 'flex-start' : (opts.align === 'right' ? 'flex-end' : 'center');
+  const fontPt = opts.fontPt || 6.5;
+  const alignKey = opts.align || 'center';
+  const justify = alignKey === 'left' ? 'flex-start' : (alignKey === 'right' ? 'flex-end' : 'center');
   const bold = opts.bold ? 'font-weight:700;' : '';
   const bg = opts.whiteBg ? 'background:#fff;' : '';
+  const padL = opts.padL !== undefined ? opts.padL : 0;
+  const padR = opts.padR !== undefined ? opts.padR : 0;
   const wrap = opts.wrap ? 'white-space:normal;line-height:1.3;align-items:flex-start;padding-top:2px;' : 'white-space:nowrap;overflow:hidden;';
-  return `<div style="position:absolute;left:${px(xPt)}px;top:${px(yPt)}px;width:${px(wPt)}px;height:${px(hPt)}px;font-size:${px(fontPt)}px;display:flex;align-items:center;justify-content:${align};text-align:center;${wrap}${bold}${bg}color:#111;font-family:Arial,Helvetica,sans-serif;">${html}</div>`;
+  return `<div style="position:absolute;left:${px(xPt)}px;top:${px(yPt)}px;width:${px(wPt)}px;height:${px(hPt)}px;font-size:${px(fontPt)}px;display:flex;align-items:center;justify-content:${justify};text-align:${alignKey};padding-left:${px(padL)}px;padding-right:${px(padR)}px;box-sizing:border-box;${wrap}${bold}${bg}color:#111;font-family:Arial,Helvetica,sans-serif;">${html}</div>`;
 }
 function ovCheck(xPt,yPt,wPt,hPt,checked){
-  return ov(xPt,yPt,wPt,hPt, checked?'✕':'', {align:'center', fontPt:9, bold:true});
+  return ov(xPt,yPt,wPt,hPt, checked?'✕':'', {align:'center', fontPt:7.5, bold:true});
 }
 
 function fitPageScale(outerId){
@@ -846,12 +926,10 @@ function fitPageScale(outerId){
 window.addEventListener('resize', ()=> fitPageScale('fv-page-outer'));
 
 function photoCellOverlay(xPt,yPt,wPt,hPt, photoObj, showGeo){
+  // El sello (fecha, UTM, altitud, etc.) ya viene grabado dentro de la foto al capturarla.
   let inner;
   if(photoObj && photoObj.dataUrl){
     inner = `<img src="${photoObj.dataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;">`;
-    if(showGeo && photoObj.geo){
-      inner += `<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.62);color:#fff;font-size:${px(6)}px;padding:3px 5px;line-height:1.3;text-align:left;">📍 ${esc(photoObj.geo.utm||'')}<br>🕒 ${esc(photoObj.geo.timestamp||'')}</div>`;
-    }
   } else {
     inner = `<span style="color:#bbb;font-size:${px(7)}px;">Sin foto</span>`;
   }
@@ -877,34 +955,37 @@ const DETERIORO_ROWS = [
 
 function buildFormatSheet(d){
   const photos = d.photos || [null,null,null,null];
-  const codigoDisplay = d.codigo || (d.buzon ? ('BZ.'+d.buzon) : '');
+  const buzonDisplay = fmtBuzon(d.buzon);
+  const codigoDisplay = d.codigo || (d.buzon ? ('BZ.'+buzonDisplay) : '');
   const nativeW = (PAGE_W*SCALE_BASE).toFixed(2), nativeH = (PAGE_H*SCALE_BASE).toFixed(2);
   let inner = `<div class="fv-page-inner" style="position:absolute;left:0;top:0;width:${nativeW}px;height:${nativeH}px;transform-origin:top left;background-image:url('${PAGE_BG}');background-size:100% 100%;background-repeat:no-repeat;font-family:Arial,Helvetica,sans-serif;">`;
 
   // ---- Top header values ----
-  inner += ov(105,73.2,272,8.0, esc(d.colector));
-  inner += ov(95,80.9,42,8.0, esc(d.fecha));
-  inner += ov(159,80.9,20,8.0, esc(d.hora));
-  inner += ov(203,80.9,50,8.0, esc(d.buzon));
-  inner += ov(304,80.9,75,8.0, esc(codigoDisplay), {bold:true});
-  inner += ov(102,88.8,172,8.0, esc(d.avcalle));
-  inner += ov(312,88.8,68,8.0, esc(d.mzlote));
-  inner += ov(143,96.7,235,8.4, esc(d.descargar));
-  inner += ov(156,105.0,222,8.0, esc(d.sistema));
+  inner += ov(105,73.2,272,8.0, esc(d.colector), {fontPt:6.8, align:'left', padL:2});
+  inner += ov(95,80.9,42,8.0, esc(fmtFecha(d.fecha)), {fontPt:6.0, align:'left', padL:2});
+  inner += ov(159,80.9,20,8.0, esc(d.hora), {fontPt:6.8, align:'left', padL:2});
+  inner += ov(203,80.9,50,8.0, esc(buzonDisplay), {fontPt:6.0, align:'left', padL:2});
+  inner += ov(304,80.9,75,8.0, esc(codigoDisplay), {bold:true, fontPt:6.0, align:'left', padL:2});
+  inner += ov(102,88.8,172,8.0, esc(d.avcalle), {fontPt:6.8, align:'left'});
+  inner += ov(312,88.8,68,8.0, esc(d.mzlote), {fontPt:6.8, align:'left'});
+  inner += ov(143,96.7,235,8.4, esc(d.descargar), {fontPt:6.8, align:'left'});
+  inner += ov(156,105.0,222,8.0, esc(d.sistema), {fontPt:6.8, align:'left'});
 
-  // ---- Right header box (cover static text, write current values) ----
-  inner += ov(383.5,49.0,161,7.9, esc(d.consorcio)||'CONSORCIO CASTILLA', {bold:true, whiteBg:true, fontPt:7.5});
-  inner += ov(440,57.6,104,7.5, esc(d.inspector), {whiteBg:true, fontPt:7});
-  inner += ov(433,66.0,111,7.1, esc(d.fechaEmision), {whiteBg:true, fontPt:7});
+  // ---- Right header box (cover static text, write current values; izquierda, con margen) ----
+  inner += ov(383.5,49.0,161,7.9, esc(d.consorcio)||'CONSORCIO CASTILLA', {bold:true, whiteBg:true, fontPt:7, align:'left', padL:3});
+  inner += ov(440,57.6,104,7.5, esc(d.inspector), {whiteBg:true, fontPt:7, align:'left', padL:3, padR:3});
+  inner += ov(433,66.0,111,7.1, esc(fmtFecha(d.fechaEmision)), {whiteBg:true, fontPt:7, align:'left', padL:3, padR:3});
 
   // ---- Ubicación ----
   inner += ovCheck(COL_A.x,128.76,COL_A.w,7.92, d.acceso==='Con acceso');
   inner += ovCheck(COL_B.x,128.76,COL_B.w,7.92, d.acceso==='Sellado');
   inner += ovCheck(COL_A.x,136.68,COL_A.w,7.92, d.situacion==='Enterrado');
   inner += ovCheck(COL_B.x,136.68,COL_B.w,7.92, d.situacion==='No ubicado');
-  // Coordenadas: 3 campos separados (Zona / Este / Norte)
-  inner += ov(182.52,145.1,75.2,7.4, esc(d.coordEste), {fontPt:6.3});
-  inner += ov(257.8,145.1,75.2,7.4, esc(d.coordNorte), {fontPt:6.3});
+  // Coordenadas: 2 campos separados (Este / Norte), cada uno con su propio recuadro completo
+  inner += `<div style="position:absolute;left:${px(182.9)}px;top:${px(145.1)}px;width:${px(74.6)}px;height:${px(7.4)}px;border:1px solid #333;box-sizing:border-box;"></div>`;
+  inner += `<div style="position:absolute;left:${px(258.4)}px;top:${px(145.1)}px;width:${px(74.4)}px;height:${px(7.4)}px;border:1px solid #333;box-sizing:border-box;"></div>`;
+  inner += ov(182.9,145.1,74.6,7.4, esc(d.coordEste), {fontPt:6.3});
+  inner += ov(258.4,145.1,74.4,7.4, esc(d.coordNorte), {fontPt:6.3});
 
   // ---- Estado General ----
   ESTADO_ROWS.forEach(row=>{
@@ -941,10 +1022,11 @@ function buildFormatSheet(d){
   inner += ovCheck(278.6,350.5,54.4,7.9, d.material==='Otro');
   inner += ov(330,359.2,190,7.2, esc(d.materialOtro), {fontPt:6.5});
 
-  // ---- Diagrama derecho: diámetro interno, øi, øs (ya vienen en la imagen de fondo) ----
-  inner += ov(481,193.1,34,7.0, esc(numOrBlank(d.diamInterno)), {align:'center', fontPt:6.5});
-  inner += ov(440.9,343.1,46.6,7.4, esc(numOrBlank(d.di)), {align:'center'});
-  inner += ov(440.9,351.0,46.6,7.4, esc(numOrBlank(d.ds)), {align:'center'});
+  // ---- Diagrama derecho: profundidad, diámetro interno, øi, øs ----
+  inner += ov(443.7,122.1,28.3,7.15, esc(numOrBlank(d.profundidad)), {align:'center', fontPt:6});
+  inner += ov(481,193.1,34,7.0, esc(numOrBlank(d.diamInterno)), {align:'center', fontPt:6});
+  inner += ov(440.9,343.1,46.6,7.4, esc(numOrBlank(d.di)), {align:'center', fontPt:6.5});
+  inner += ov(440.9,351.0,46.6,7.4, esc(numOrBlank(d.ds)), {align:'center', fontPt:6.5});
 
   // ---- Fotos ----
   inner += photoCellOverlay(74,390.5,204.6,134.6, photos[0], false);
@@ -953,7 +1035,7 @@ function buildFormatSheet(d){
   inner += photoCellOverlay(333,539.5,189.6,141.6, photos[3], true);
 
   // ---- Observaciones ----
-  inner += ov(100,690,430,120, esc(d.observaciones), {fontPt:7, wrap:true});
+  inner += ov(100,690,430,120, esc(d.observaciones), {fontPt:6.5, wrap:true, align:'left'});
 
   inner += `</div>`;
   return `<div id="fv-page-outer" style="position:relative;width:100%;overflow:hidden;">${inner}</div>`;
@@ -1133,7 +1215,8 @@ function editRecordFromView(){
 
 function updateAutoCodigo(){
   const v = document.getElementById('f_buzon').value.trim();
-  document.getElementById('f_codigo').value = v ? ('BZ.'+v) : '';
+  const padded = /^\d+$/.test(v) ? v.padStart(2,'0') : v;
+  document.getElementById('f_codigo').value = v ? ('BZ.'+padded) : '';
 }
 
 // init defaults
